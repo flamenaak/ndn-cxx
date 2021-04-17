@@ -28,6 +28,8 @@
 #include "ndn-cxx/util/time.hpp"
 
 #include <boost/logic/tribool.hpp>
+#include "ns3/ptr.h"
+#include "ns3/myresultapp.h"
 
 namespace ndn {
 
@@ -65,6 +67,35 @@ public:
    */
   explicit
   Interest(const Block& wire);
+
+  //these methods to check whether it has BF
+  void putBf ();
+
+  bool hasBf () const;
+
+  //setters and getters for a control data member to
+  //check whether interest is for conternt advertisement
+  void setIsDataAdvertFlag ();
+
+  void resetIsDataAdvertFlag ();
+
+  bool isDataAdvert ()  const;
+
+  //declaration of BF setter and getters
+  void
+  setBfComponents (ns3::Ptr<ns3::MyBloom_filter> nodeFilterPointer);
+
+  void
+  incrementHopCount();
+
+  ns3::Ptr<ns3::MyBloom_filter>
+  getBfComponents (size_t PEC, double FPP) const;
+
+  uint16_t
+  getIEC() const;
+
+  uint16_t
+  getHopCount() const;
 
   /** @brief Prepend wire encoding to @p encoder according to NDN Packet Format v0.3.
    */
@@ -408,6 +439,20 @@ private:
   std::vector<Block> m_parameters;
 
   mutable Block m_wire;
+
+  //BF components
+  uint16_t m_tableSize;
+  unsigned char* m_bitTable;
+  uint16_t m_insertedElementCount;
+  uint16_t m_saltCount;
+  bool m_hasBf;
+  bool m_isDataAdvert;
+  //uint64_t m_size;
+
+  //aims calculating hit distance
+  uint16_t m_hopCount;
+
+  friend class BfInterest;
 };
 
 NDN_CXX_DECLARE_WIRE_ENCODE_INSTANTIATIONS(Interest);

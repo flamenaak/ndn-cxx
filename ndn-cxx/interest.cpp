@@ -26,6 +26,9 @@
 #include "ndn-cxx/security/transform/step-source.hpp"
 #include "ndn-cxx/security/transform/stream-sink.hpp"
 #include "ndn-cxx/util/random.hpp"
+#include "ns3/ptr.h"
+
+using namespace ns3;
 
 #ifdef NDN_CXX_HAVE_STACKTRACE
 #include <boost/stacktrace/stacktrace.hpp>
@@ -49,7 +52,28 @@ bool Interest::s_errorIfCanBePrefixUnset = true;
 boost::logic::tribool Interest::s_defaultCanBePrefix = boost::logic::indeterminate;
 bool Interest::s_autoCheckParametersDigest = true;
 
+Interest::Interest()
+  : m_interestLifetime(time::milliseconds::min())
+  , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
+  , m_tableSize (0)
+  , m_bitTable (NULL)
+  , m_insertedElementCount (0)
+  , m_saltCount (0)
+  , m_hasBf (false)
+  , m_isDataAdvert (false)
+  , m_hopCount (0)
+{
+}
+
 Interest::Interest(const Name& name, time::milliseconds lifetime)
+  : m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
+  , m_tableSize (0)
+  , m_bitTable (NULL)
+  , m_insertedElementCount (0)
+  , m_saltCount (0)
+  , m_hasBf (false)
+  , m_isDataAdvert (false)
+  , m_hopCount (0)
 {
   setName(name);
   setInterestLifetime(lifetime);
@@ -62,6 +86,90 @@ Interest::Interest(const Name& name, time::milliseconds lifetime)
 Interest::Interest(const Block& wire)
 {
   wireDecode(wire);
+  m_tableSize = 0;
+  m_bitTable = NULL;
+  m_insertedElementCount = 0;
+  m_saltCount = 0;
+  m_hasBf = false;
+  m_isDataAdvert = false;
+  m_hopCount = 0;
+}
+
+void
+Interest::putBf ()
+{
+  m_hasBf = true;
+}
+
+void
+Interest::setIsDataAdvertFlag ()
+{
+  m_isDataAdvert =true;
+}
+
+void
+Interest::resetIsDataAdvertFlag ()
+{
+  m_isDataAdvert=false;
+}
+
+bool
+Interest::hasBf () const
+{
+  return m_hasBf;
+}
+
+bool
+Interest::isDataAdvert() const
+{
+  return m_isDataAdvert;
+}
+
+//increment hop count
+void
+Interest::incrementHopCount ()
+{
+  ++m_hopCount;
+  m_wire.reset ();
+}
+
+//BF setter and getters
+void
+Interest::setBfComponents (Ptr<MyBloom_filter> nodeFilterPointer)
+{
+  //m_hasBf=true;
+  m_tableSize = nodeFilterPointer->size();
+  m_saltCount= nodeFilterPointer->salt_count();
+  if (m_bitTable!=NULL) {
+    delete[] m_bitTable;
+  }
+  m_bitTable = new unsigned char[m_tableSize / bits_per_char];
+  std::copy (nodeFilterPointer->table(), nodeFilterPointer->table() + (m_tableSize / bits_per_char), m_bitTable);
+  m_insertedElementCount = nodeFilterPointer->element_count();
+  m_wire.reset ();
+}
+
+Ptr<MyBloom_filter>
+Interest::getBfComponents (size_t PEC, double FPP) const {
+  Ptr<MyBloom_filter> filterPointer;
+ // filterPointer = CreateObject<MyBloom_filter> (m_tableSize, m_saltCount, ns3::UNIVERSAL_SEED, m_bitTable);
+  //new method:
+  filterPointer= CreateObject<MyBloom_filter> (PEC, FPP, ns3::UNIVERSAL_SEED);
+  filterPointer->delete_bitTable();
+  filterPointer->assign_bitTable(m_bitTable, m_tableSize);
+  filterPointer->set_inserted_element_count (m_insertedElementCount);
+  filterPointer->set_salt_count (m_saltCount);
+  return filterPointer;
+}
+
+uint16_t
+Interest::getIEC() const{
+return m_insertedElementCount;
+}
+
+uint16_t
+Interest::getHopCount() const{
+return m_hopCount;
 }
 
 // ---- encode and decode ----
@@ -105,6 +213,8 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
   //              [InterestLifetime]
   //              [HopLimit]
   //              [ApplicationParameters [InterestSignature]]
+  //              BF elements
+  //              hop count
   // (elements are encoded in reverse order)
 
   // sanity check of ApplicationParameters and ParametersSha256DigestComponent
@@ -119,6 +229,31 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
   }
 
   size_t totalLength = 0;
+
+  getHopCount(); // to ensure that hop count is properly set
+  totalLength += prependNonNegativeIntegerBlock(encoder,
+           tlv::HopCount, (uint64_t)m_hopCount);
+
+    //has Bf ?
+  if (m_hasBf) {
+    //BF components
+   totalLength += encoder.prependByteArrayBlock (tlv::BitTable, m_bitTable, (m_tableSize / bits_per_char));
+   totalLength += prependNonNegativeIntegerBlock(encoder,
+            tlv::TableSize, (uint64_t)m_tableSize);
+    // element count
+   totalLength += prependNonNegativeIntegerBlock(encoder,
+            tlv::InsertedElementCount, (uint64_t)m_insertedElementCount);
+    // salt count
+    totalLength += prependNonNegativeIntegerBlock(encoder,
+            tlv::SaltCount, (uint64_t)m_saltCount);
+    // hasBf flag
+    totalLength += prependNonNegativeIntegerBlock(encoder,
+            tlv::HasBf, (uint64_t)m_hasBf);
+
+    // m_isDataAdvert
+    totalLength += prependNonNegativeIntegerBlock(encoder,
+              tlv::IsDataAdvert, (uint64_t)m_isDataAdvert);
+ }
 
   // ApplicationParameters and following elements (in reverse order)
   std::for_each(m_parameters.rbegin(), m_parameters.rend(), [&] (const Block& b) {
@@ -298,6 +433,46 @@ Interest::wireDecode(const Block& wire)
         m_parameters.push_back(*element);
         lastElement = 8;
         break;
+      }
+      case tlv::IsDataAdvert: {
+         m_isDataAdvert = (bool)readNonNegativeInteger(*element);
+         break;
+      }
+      case tlv::HasBf: {
+        m_hasBf = (bool)readNonNegativeInteger(*element);
+      } 
+      case tlv::SaltCount {
+        if(m_hasBf == false){
+          break;
+        }
+        m_saltCount = readNonNegativeInteger(*element);
+      }
+      case tlv::InsertedElementCount {
+        if(m_hasBf == false){
+          break;
+        }
+        m_insertedElementCount = readNonNegativeInteger(*element);
+      }
+      case tlv::TableSize {
+        if(m_hasBf == false){
+          break;
+        }
+        m_tableSize = readNonNegativeInteger(*element);
+      }
+      case tlv::BitTable {
+        if(m_hasBf == false){
+          break;
+        }
+
+        if (m_bitTable!=NULL) {
+             delete[] m_bitTable;
+        }
+        //Hey bitTable should not be NULL !!!!!!
+        m_bitTable = new unsigned char[m_tableSize /bits_per_char];
+        std::memcpy(m_bitTable, *element->value(), *element->value_size());
+      }
+      case tlv::HopCount {
+        m_hopCount = readNonNegativeInteger(*element);
       }
       default: { // unrecognized element
         // if the TLV-TYPE is critical, abort decoding
