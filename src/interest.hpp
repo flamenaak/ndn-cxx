@@ -31,6 +31,15 @@
 #include "tag-host.hpp"
 #include "link.hpp"
 
+#include "ns3/blst.h"
+#include "ns3/BloomFilterContainer.hpp"
+#include "ns3/BfXorRepresentation.hpp"
+#include "ns3/SignedMessage.hpp"
+#include "ns3/SidPkPair.hpp"
+
+using namespace blst;
+using namespace bls_signatures;
+
 namespace ndn {
 
 class Data;
@@ -447,6 +456,40 @@ private:
 
   nfd::LocalControlHeader m_localControlHeader;
   friend class nfd::LocalControlHeader;
+
+// bls signatures
+public:
+  enum InterestType : char {
+      CAR, CA, content
+  };
+
+private:
+  InterestType m_type;
+  std::vector<BloomFilterContainer*> m_bloomFilters;
+  P1_Affine* m_signature;
+  std::vector<SidPkPair*> m_signerList;
+
+public:
+  std::string getTypeString();
+  InterestType getInterestType() const;
+  std::vector<BloomFilterContainer*> getBloomFilters();
+  std::vector<SidPkPair*> getSignerList();
+  void addSigner(SidPkPair* signerPair);
+  P1_Affine* getSignature();
+
+  void setInterestType(const InterestType& newType);
+  void setSignature(P1_Affine* newSignaturePtr);
+
+  void merge(Interest* other);
+  void merge(Interest* other, vector<SidPkPair*> additionalSignerList);
+  void mergeBf(BloomFilterContainer* bloomFilter);
+
+  void addBloomFilter(BloomFilterContainer* bf);
+  vector<BloomFilterContainer*> getAllBloomFilters();
+  bool verify(vector<SidPkPair*> additionalSignerList);
+  size_t getPublicKeyIndex(SignerId signerId);
+  size_t searchForPk(SignerId signerId, vector<SidPkPair*> list);
+
 };
 
 std::ostream&

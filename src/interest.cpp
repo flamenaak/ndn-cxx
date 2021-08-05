@@ -23,6 +23,9 @@
 #include "util/random.hpp"
 #include "util/crypto.hpp"
 #include "data.hpp"
+#include "ns3/Signer.hpp"
+
+using namespace ns3;
 
 namespace ndn {
 
@@ -36,13 +39,21 @@ static_assert(std::is_base_of<tlv::Error, Interest::Error>::value,
 Interest::Interest()
   : m_interestLifetime(time::milliseconds::min())
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
+  , m_type(CAR)
+  , m_signature(NULL)
+  //, m_size (0)
 {
+  m_bloomFilters.clear();
+  m_signerList.clear();
 }
+
 
 Interest::Interest(const Name& name)
   : m_name(name)
   , m_interestLifetime(time::milliseconds::min())
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
+  , m_type(CAR)
+  , m_signature(NULL)
 {
 }
 
@@ -50,7 +61,12 @@ Interest::Interest(const Name& name, const time::milliseconds& interestLifetime)
   : m_name(name)
   , m_interestLifetime(interestLifetime)
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
+  , m_type(CAR)
+  , m_signature(NULL)
+  //, m_size (0)
 {
+  m_bloomFilters.clear();
+  m_signerList.clear();
 }
 
 Interest::Interest(const Block& wire)
@@ -253,6 +269,72 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
   getNonce(); // to ensure that Nonce is properly set
   totalLength += encoder.prependBlock(m_nonce);
 
+  bool hasBls = m_signature != NULL;
+  if(hasBls) {
+    { // serialize bf vector
+      vector<byte> serializedContainers;
+      serializedContainers.clear();
+
+      unsigned char* charptr;
+      // serialize bf vector size
+      size_t vectorSize = m_bloomFilters.size();
+      charptr = (unsigned char*)&vectorSize;
+      for (int i = 0; i < size_tBytes; i++) {
+        serializedContainers.push_back(*(charptr + i));
+      }
+      // serialize vector
+      for (size_t i = 0; i < vectorSize; i++) {
+        BloomFilterContainer* container = m_bloomFilters[i];
+        unsigned char buffer[container->getByteSize()];
+        container->serialize(buffer, container->getByteSize());
+        for (size_t j = 0; j < container->getByteSize(); j++) {
+          serializedContainers.push_back(*(buffer + j));
+        }
+      }
+      // preppend the vector
+      byte containerBuffer[serializedContainers.size()];
+      copy(serializedContainers.begin(), serializedContainers.end(), containerBuffer);
+      totalLength += prependByteArrayBlock(encoder, tlv::BfContainerVector, containerBuffer, serializedContainers.size());
+    }
+
+    { // serialize signer List
+      unsigned char* charptr;
+      vector<byte> serializedSigners;
+      serializedSigners.clear();
+      // serialize vector size
+      size_t vectorSize = m_signerList.size();
+      charptr = (unsigned char*)&vectorSize;
+      for (int i = 0; i < size_tBytes; i++) {
+        serializedSigners.push_back(*(charptr + i));
+      }
+      // serialize vector
+      for (size_t i = 0; i < vectorSize; i++) {
+        SidPkPair* pair = m_signerList[i];
+        unsigned char buffer[pair->getByteSize()];
+        pair->serialize(buffer, pair->getByteSize());
+        for (size_t j = 0; j < pair->getByteSize(); j++) {
+          serializedSigners.push_back(*(buffer + j));
+        }
+      }
+      // preppend the vector
+      byte signerBuffer[serializedSigners.size()];
+      copy(serializedSigners.begin(), serializedSigners.end(), signerBuffer);
+      totalLength += prependByteArrayBlock(encoder, tlv::SignerList, signerBuffer, serializedSigners.size());
+    }
+
+    { // serialize signature
+      byte sigser[96];
+      m_signature->serialize(sigser);
+      totalLength += prependByteArrayBlock(encoder, tlv::Signature, sigser, 96);
+    }
+
+    { // serialize interest type
+      totalLength += prependNonNegativeIntegerBlock(encoder, tlv::InterestType, (uint64_t)m_type);
+    }
+  }
+  totalLength += prependNonNegativeIntegerBlock(encoder, tlv::HasBls, (uint64_t)hasBls);
+
+
   // Selectors
   if (hasSelectors())
     {
@@ -297,13 +379,18 @@ Interest::wireDecode(const Block& wire)
   m_wire = wire;
   m_wire.parse();
 
-  // Interest ::= INTEREST-TYPE TLV-LENGTH
-  //                Name
-  //                Selectors?
-  //                Nonce
-  //                InterestLifetime?
-  //                Link?
-  //                SelectedDelegation?
+// Interest ::= INTEREST-TYPE TLV-LENGTH
+    //                Name
+    //                Selectors?
+    //                BLS signatures
+    //                    type
+    //                    signature
+    //                    signer list
+    //                    bf container list
+    //                Nonce
+    //                InterestLifetime?
+    //                Link?
+    //                SelectedDelegation?
 
   if (m_wire.type() != tlv::Interest)
     BOOST_THROW_EXCEPTION(Error("Unexpected TLV number when decoding Interest"));
@@ -319,6 +406,65 @@ Interest::wireDecode(const Block& wire)
     }
   else
     m_selectors = Selectors();
+
+  bool hasBls = false;
+  
+  val = m_wire.find(tlv::HasBls);
+  if (val != m_wire.elements_end())
+  {
+    hasBls = (bool)readNonNegativeInteger(*val);
+  }
+
+  if (hasBls) {
+    
+    //NDN_LOG_UNCOND("found bls");
+    val = m_wire.find(tlv::InterestType);
+    if (val != m_wire.elements_end())
+    {
+      m_type = (InterestType)readNonNegativeInteger(*val);
+    }
+
+    val = m_wire.find(tlv::Signature);
+    if (val != m_wire.elements_end())
+    {
+      byte array[96];
+      std::memcpy(array, val->value(), val->value_size());
+      m_signature = new P1_Affine(&array[0]);
+    }
+
+    val = m_wire.find(tlv::SignerList);
+    if (val != m_wire.elements_end())
+    {
+      byte array[val->value_size()];
+      std::memcpy(array, val->value(), val->value_size());
+      unsigned char* data = &array[0];
+      size_t vectorSize = *((size_t*)data);
+      data += size_tBytes;
+
+      for (size_t i = 0; i < vectorSize; i++) {
+        SidPkPair* pair = new SidPkPair();
+        pair->deserialize(data);
+        m_signerList.push_back(pair);
+      }
+    }
+
+    val = m_wire.find(tlv::BfContainerVector);
+    if (val != m_wire.elements_end())
+    {
+      byte array[val->value_size()];
+      std::memcpy(array, val->value(), val->value_size());
+      unsigned char* data = &array[0];
+      size_t vectorSize = *((size_t*)data);
+      data += size_tBytes;
+
+      for (size_t i = 0; i < vectorSize; i++) {
+        BloomFilterContainer* container = new BloomFilterContainer();
+        container->deserialize(data);
+        data += container->getByteSize();
+        m_bloomFilters.push_back(container);
+      }
+    }
+  }
 
   // Nonce
   m_nonce = m_wire.get(tlv::Nonce);
@@ -483,5 +629,221 @@ operator<<(std::ostream& os, const Interest& interest)
 
   return os;
 }
+  #pragma region BLS_implementation
+ // BLS signature methods implementation
+  std::string Interest::getTypeString()
+  {
+    switch (m_type)
+    {
+    case Interest::CAR:
+      return "CAR";
+    case Interest::CA:
+      return "CA";
+    case Interest::content:
+      return "content";
+    default:
+      break;
+    }
+    return "";
+  }
 
+  std::vector<BloomFilterContainer*> Interest::getBloomFilters()
+  {
+    return m_bloomFilters;
+  }
+
+  P1_Affine* Interest::getSignature()
+  {
+    return m_signature;
+  }
+
+  void Interest::addBloomFilter(BloomFilterContainer* bf)
+  {
+    m_bloomFilters.push_back(bf);
+  }
+
+  vector<BloomFilterContainer*> Interest::getAllBloomFilters()
+  {
+    vector<BloomFilterContainer* > result;
+
+    for (size_t i = 0; i < m_bloomFilters.size(); i++) {
+      BloomFilterContainer *current = m_bloomFilters[i];
+      result.push_back(new BloomFilterContainer(current->getSignerId(), *(current->getBloomFilter())));
+      vector<BloomFilterContainer *> tempBfs = current->reconstructBfs();
+      result.insert(result.end(), tempBfs.begin(), tempBfs.end());
+    }
+
+    return result;
+  }
+
+  std::vector<SidPkPair*> Interest::getSignerList()
+  {
+    return m_signerList;
+  }
+
+  Interest::InterestType Interest::getInterestType() const
+  {
+    return m_type;
+  }
+
+  void Interest::setInterestType(const Interest::InterestType& type)
+  {
+    m_type = type;
+  }
+
+  void Interest::setSignature(blst::P1_Affine *signature) 
+  {
+    m_signature = signature;
+  }
+
+  /**
+   * @brief adds a new SidPkPair into the signer list avoiding adding duplicates based on SignerId
+   *
+   * @param signerPair
+   */
+  void Interest::addSigner(SidPkPair* signerPair)
+  {
+    for (size_t i = 0; i < m_signerList.size(); i++) {
+      if (signerPair->m_signerId == m_signerList[i]->m_signerId) return;
+    }
+    m_signerList.push_back(signerPair);
+  }
+
+  void Interest::merge(Interest* other)
+  {
+    vector<SidPkPair*> additionalSignerList;
+    additionalSignerList.clear();
+    return merge(other, additionalSignerList);
+  }
+
+  void Interest::mergeBf(BloomFilterContainer* bloomFilter)
+  {
+    //printf("mergeBf: entered method \n");
+    if (m_bloomFilters.size() == 0)
+    {
+      m_bloomFilters.push_back(bloomFilter);
+      return;
+    }
+    // find the closest bloomFilter
+    unsigned long minDistance = -1;
+    BloomFilterContainer* closestBloomFilter;
+    size_t index = 0;
+    //printf("mergeBf: size of m_bloomFilters %lu \n", m_bloomFilters.size());
+    for (size_t i = 0; i < m_bloomFilters.size(); i++) {
+      unsigned long distance = m_bloomFilters[i]->calculateDistance(bloomFilter->getBloomFilter());
+      if (minDistance == (unsigned long)-1 || distance < minDistance) {
+        minDistance = distance;
+        closestBloomFilter = m_bloomFilters[i];
+        index = i;
+      }
+    }
+    if (minDistance == -1) {
+      m_bloomFilters.push_back(bloomFilter);
+    }
+    //printf("mergeBf: finished finding nearest \n");
+    if (minDistance <= (unsigned long)DELTA_MAX) {
+      if (closestBloomFilter->merge(bloomFilter)) {
+        return;
+      }
+      else if (bloomFilter->merge(closestBloomFilter)) {
+        m_bloomFilters[index] = bloomFilter;
+      }
+      else {
+        m_bloomFilters.push_back(bloomFilter);
+      }
+    }
+    else {
+      // this could be added after this for loop to not slow down next iteration
+      printf("Could not reduce bf, the distance is too great: %lu \n", minDistance);
+      m_bloomFilters.push_back(bloomFilter);
+    }
+  }
+
+  void Interest::merge(Interest* other, vector<SidPkPair*> additionalSignerList)
+  {
+    if (m_type != other->getInterestType()) {
+      printf("not merging, wrong type \n");
+      return;
+    }
+
+    if (other->getBloomFilters().size() == 0) {
+      printf("not merging, no bloom filters \n");
+      return;
+    }
+
+    // this is probably not necessary, received interests are already verified
+    
+    // if (!other->verify(additionalSignerList)) {
+    //   printf("could not verify Interest being merged \n");
+    //   return;
+    // }
+
+    for (size_t i = 0; i < other->getBloomFilters().size(); i++) {
+      mergeBf(other->getBloomFilters()[i]);
+    }
+    // merge the signer lists
+    for (size_t i = 0; i < other->getSignerList().size(); i++) {
+      m_signerList.push_back(other->getSignerList()[i]);
+    }
+
+    P1 temp = P1(*m_signature);
+    temp.aggregate(*other->getSignature());
+    m_signature = new P1_Affine(temp);
+  }
+
+  bool Interest::verify(vector<SidPkPair*> additionalSignerList)
+  {
+    if (m_signature == NULL) return false;
+    
+    std::vector<SignedMessage> messages;
+    messages.clear();
+
+    std::vector<P1_Affine> signatures;
+    signatures.clear();
+    signatures.push_back(*m_signature);
+    BloomFilterContainer* bfContainer;
+    BloomFilterContainer* reduction;
+
+    for (size_t i = 0; i < m_bloomFilters.size(); i++) {
+      bfContainer = m_bloomFilters[i];
+      size_t index = getPublicKeyIndex(bfContainer->getSignerId());
+
+      if (index == (size_t)-1) {
+        printf("did not find public key of a main container, id: %lu \n", bfContainer->getSignerId());
+        return false;
+      }
+      messages.push_back(SignedMessage(bfContainer->getBloomFilter(), m_signerList[index]->m_pk));
+
+      std::vector<BloomFilterContainer*> reconstructed = bfContainer->reconstructBfs();
+      for (size_t j = 0; j < reconstructed.size(); j++) {
+        reduction = reconstructed[j];
+        size_t reductionIndex = getPublicKeyIndex(reduction->getSignerId());
+        if (reductionIndex == (size_t)-1) {
+          reductionIndex = searchForPk(reduction->getSignerId(), additionalSignerList);
+        }
+        if (reductionIndex == (size_t)-1) {
+          printf("did not find public key of a reduction \n");
+          return false;
+        }
+        messages.push_back(SignedMessage(reduction->getBloomFilter(), m_signerList[reductionIndex]->m_pk));
+      }
+    }
+    return Signer::verify(messages, signatures);
+  }
+
+  // extend this when you have a public key cache
+  size_t Interest::getPublicKeyIndex(SignerId signerId)
+  {
+    return searchForPk(signerId, m_signerList);
+  }
+
+  size_t Interest::searchForPk(SignerId signerId, vector<SidPkPair*> list)
+  {
+    for (size_t i = 0; i < list.size(); i++) {
+      //printf("index %lu, signer id %lu \n", i, m_signerList[i]->m_signerId);
+      if (list[i]->m_signerId == signerId) return i;
+    }
+    return -1;
+  }
+  #pragma endregion
 } // namespace ndn

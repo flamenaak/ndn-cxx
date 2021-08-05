@@ -88,6 +88,12 @@ enum {
   LinkDelegation = 31,
   SelectedDelegation = 32,
 
+  BfContainerVector=41,
+  InterestType=42,
+  SignerList=43,
+  Signature=44,
+  HasBls=45,
+
   AppPrivateBlock1 = 128,
   AppPrivateBlock2 = 32767
 };
