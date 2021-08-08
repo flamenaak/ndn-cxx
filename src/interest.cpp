@@ -39,7 +39,7 @@ static_assert(std::is_base_of<tlv::Error, Interest::Error>::value,
 Interest::Interest()
   : m_interestLifetime(time::milliseconds::min())
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
-  , m_type(CAR)
+  , m_type(default_)
   , m_signature(NULL)
   //, m_size (0)
 {
@@ -52,7 +52,7 @@ Interest::Interest(const Name& name)
   : m_name(name)
   , m_interestLifetime(time::milliseconds::min())
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
-  , m_type(CAR)
+  , m_type(default_)
   , m_signature(NULL)
 {
 }
@@ -61,7 +61,7 @@ Interest::Interest(const Name& name, const time::milliseconds& interestLifetime)
   : m_name(name)
   , m_interestLifetime(interestLifetime)
   , m_selectedDelegationIndex(INVALID_SELECTED_DELEGATION_INDEX)
-  , m_type(CAR)
+  , m_type(default_)
   , m_signature(NULL)
   //, m_size (0)
 {
@@ -327,13 +327,12 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
       m_signature->serialize(sigser);
       totalLength += prependByteArrayBlock(encoder, tlv::Signature, sigser, 96);
     }
-
-    { // serialize interest type
-      totalLength += prependNonNegativeIntegerBlock(encoder, tlv::InterestType, (uint64_t)m_type);
-    }
   }
   totalLength += prependNonNegativeIntegerBlock(encoder, tlv::HasBls, (uint64_t)hasBls);
 
+  { // serialize interest type
+    totalLength += prependNonNegativeIntegerBlock(encoder, tlv::InterestType, (uint64_t)m_type);
+  }
 
   // Selectors
   if (hasSelectors())
@@ -407,6 +406,12 @@ Interest::wireDecode(const Block& wire)
   else
     m_selectors = Selectors();
 
+  val = m_wire.find(tlv::InterestType);
+  if (val != m_wire.elements_end())
+  {
+    m_type = (InterestType)readNonNegativeInteger(*val);
+  }
+
   bool hasBls = false;
   
   val = m_wire.find(tlv::HasBls);
@@ -418,12 +423,6 @@ Interest::wireDecode(const Block& wire)
   if (hasBls) {
     
     //NDN_LOG_UNCOND("found bls");
-    val = m_wire.find(tlv::InterestType);
-    if (val != m_wire.elements_end())
-    {
-      m_type = (InterestType)readNonNegativeInteger(*val);
-    }
-
     val = m_wire.find(tlv::Signature);
     if (val != m_wire.elements_end())
     {

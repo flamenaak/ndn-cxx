@@ -460,7 +460,7 @@ private:
 // bls signatures
 public:
   enum InterestType : char {
-      CAR, CA, content
+      default_, CAR, CA, content
   };
 
 private:
