@@ -481,15 +481,19 @@ public:
   void setSignature(P1_Affine* newSignaturePtr);
 
   void merge(Interest* other);
-  void merge(Interest* other, vector<SidPkPair*> additionalSignerList);
   void mergeBf(BloomFilterContainer* bloomFilter);
 
   void addBloomFilter(BloomFilterContainer* bf);
   vector<BloomFilterContainer*> getAllBloomFilters();
   bool verify(vector<SidPkPair*> additionalSignerList);
+  bool verify2(vector<SidPkPair*> additionalSignerList);
+  bool verify3(vector<SidPkPair*> additionalSignerList);
+
   size_t getPublicKeyIndex(SignerId signerId);
   size_t searchForPk(SignerId signerId, vector<SidPkPair*> list);
 
+  size_t estimateByteSize(bool log);
+  void logDebug();
 };
 
 std::ostream&

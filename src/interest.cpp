@@ -271,6 +271,8 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
 
   bool hasBls = m_signature != NULL;
   if(hasBls) {
+    if (!const_cast<Interest &>(*this).verify(vector<SidPkPair*>()))
+      cout << "Interest does not verify before serialization \n";
     { // serialize bf vector
       vector<byte> serializedContainers;
       serializedContainers.clear();
@@ -283,6 +285,7 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
         serializedContainers.push_back(*(charptr + i));
       }
       // serialize vector
+      int counter = 0;
       for (size_t i = 0; i < vectorSize; i++) {
         BloomFilterContainer* container = m_bloomFilters[i];
         unsigned char buffer[container->getByteSize()];
@@ -290,7 +293,12 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
         for (size_t j = 0; j < container->getByteSize(); j++) {
           serializedContainers.push_back(*(buffer + j));
         }
+        counter++;
+        counter+=container->getReductions().size();
       }
+      // if (m_type == InterestType::CAR)
+      //   std::cout << "serialized " << getName().toUri() << " with " << counter << " BFs \n";      
+      
       // preppend the vector
       byte containerBuffer[serializedContainers.size()];
       copy(serializedContainers.begin(), serializedContainers.end(), containerBuffer);
@@ -312,6 +320,9 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
         SidPkPair* pair = m_signerList[i];
         unsigned char buffer[pair->getByteSize()];
         pair->serialize(buffer, pair->getByteSize());
+        if (!pair->m_pk->on_curve())
+          cout << "serialization: pk not on curve \n";
+
         for (size_t j = 0; j < pair->getByteSize(); j++) {
           serializedSigners.push_back(*(buffer + j));
         }
@@ -326,8 +337,11 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
       byte sigser[96];
       m_signature->serialize(sigser);
       totalLength += prependByteArrayBlock(encoder, tlv::Signature, sigser, 96);
+      if (!m_signature->on_curve())
+        cout << "serialization: signature not on curve \n";
     }
   }
+  
   totalLength += prependNonNegativeIntegerBlock(encoder, tlv::HasBls, (uint64_t)hasBls);
 
   { // serialize interest type
@@ -421,7 +435,6 @@ Interest::wireDecode(const Block& wire)
   }
 
   if (hasBls) {
-    
     //NDN_LOG_UNCOND("found bls");
     val = m_wire.find(tlv::Signature);
     if (val != m_wire.elements_end())
@@ -429,6 +442,9 @@ Interest::wireDecode(const Block& wire)
       byte array[96];
       std::memcpy(array, val->value(), val->value_size());
       m_signature = new P1_Affine(&array[0]);
+
+      if (!m_signature->on_curve())
+        cout << "deserialization: singature not on curve \n";
     }
 
     val = m_wire.find(tlv::SignerList);
@@ -444,6 +460,9 @@ Interest::wireDecode(const Block& wire)
         SidPkPair* pair = new SidPkPair();
         pair->deserialize(data);
         m_signerList.push_back(pair);
+        if (!pair->m_pk->on_curve())
+          cout << "deserialization: public key not on curve";
+        data += pair->getByteSize();
       }
     }
 
@@ -455,13 +474,18 @@ Interest::wireDecode(const Block& wire)
       unsigned char* data = &array[0];
       size_t vectorSize = *((size_t*)data);
       data += size_tBytes;
-
+      int counter = 0;
       for (size_t i = 0; i < vectorSize; i++) {
         BloomFilterContainer* container = new BloomFilterContainer();
         container->deserialize(data);
         data += container->getByteSize();
         m_bloomFilters.push_back(container);
+
+        counter++;
+        counter+= container->getReductions().size();
       }
+      // if (m_type == InterestType::CAR)
+      //   std::cout << "deserialized " << getName().toUri() << " with " << counter << " BFs \n";
     }
   }
 
@@ -703,16 +727,14 @@ operator<<(std::ostream& os, const Interest& interest)
   void Interest::addSigner(SidPkPair* signerPair)
   {
     for (size_t i = 0; i < m_signerList.size(); i++) {
-      if (signerPair->m_signerId == m_signerList[i]->m_signerId) return;
+      if (signerPair->m_signerId == m_signerList[i]->m_signerId) {
+        if (!signerPair->m_pk->is_equal(*(m_signerList[i]->m_pk))) {
+          printf("ERROR: signerId %lu has colliding public keys \n", m_signerList[i]->m_signerId);
+        }
+        return;
+      }
     }
     m_signerList.push_back(signerPair);
-  }
-
-  void Interest::merge(Interest* other)
-  {
-    vector<SidPkPair*> additionalSignerList;
-    additionalSignerList.clear();
-    return merge(other, additionalSignerList);
   }
 
   void Interest::mergeBf(BloomFilterContainer* bloomFilter)
@@ -731,6 +753,8 @@ operator<<(std::ostream& os, const Interest& interest)
     for (size_t i = 0; i < m_bloomFilters.size(); i++) {
       unsigned long distance = m_bloomFilters[i]->calculateDistance(bloomFilter->getBloomFilter());
       if (minDistance == (unsigned long)-1 || distance < minDistance) {
+        if (bloomFilter == m_bloomFilters[i]) continue;
+
         minDistance = distance;
         closestBloomFilter = m_bloomFilters[i];
         index = i;
@@ -753,12 +777,12 @@ operator<<(std::ostream& os, const Interest& interest)
     }
     else {
       // this could be added after this for loop to not slow down next iteration
-      printf("Could not reduce bf, the distance is too great: %lu \n", minDistance);
+      // printf("Could not reduce bf, the distance is too great: %lu \n", minDistance);
       m_bloomFilters.push_back(bloomFilter);
     }
   }
 
-  void Interest::merge(Interest* other, vector<SidPkPair*> additionalSignerList)
+  void Interest::merge(Interest* other)
   {
     if (m_type != other->getInterestType()) {
       printf("not merging, wrong type \n");
@@ -782,7 +806,7 @@ operator<<(std::ostream& os, const Interest& interest)
     }
     // merge the signer lists
     for (size_t i = 0; i < other->getSignerList().size(); i++) {
-      m_signerList.push_back(other->getSignerList()[i]);
+      addSigner(other->getSignerList()[i]);
     }
 
     P1 temp = P1(*m_signature);
@@ -790,16 +814,51 @@ operator<<(std::ostream& os, const Interest& interest)
     m_signature = new P1_Affine(temp);
   }
 
-  bool Interest::verify(vector<SidPkPair*> additionalSignerList)
+  bool Interest::verify2(vector<SidPkPair*> additionalSignerList)
   {
-    if (m_signature == NULL) return false;
-    
+    if (m_signature == NULL) {
+      printf("ERROR: no signature present");
+      return false;
+    }
+
     std::vector<SignedMessage> messages;
     messages.clear();
-
     std::vector<P1_Affine> signatures;
     signatures.clear();
     signatures.push_back(*m_signature);
+
+    std::vector<BloomFilterContainer*> bfs = getAllBloomFilters();
+    for (size_t i = 0; i < bfs.size(); i++)
+    {
+      size_t index = getPublicKeyIndex(bfs[i]->getSignerId());
+
+      if (index == (size_t)-1) {
+        printf("did not find public key of a main container, id: %lu \n", bfs[i]->getSignerId());
+        return false;
+      }
+      if (index == (size_t)-1) {
+        index = searchForPk(bfs[i]->getSignerId(), additionalSignerList);
+      }
+      if (index == (size_t)-1) {
+        printf("did not find public key of a main container, id: %lu \n", bfs[i]->getSignerId());
+        return false;
+      }
+      messages.push_back(SignedMessage(bfs[i]->getBloomFilter(), m_signerList[index]->m_pk));
+    }
+
+    return Signer::verify(messages, signatures);
+  }
+
+
+  bool Interest::verify(vector<SidPkPair*> additionalSignerList)
+  {
+    if (m_signature == NULL) {
+      printf("ERROR: no signature present");
+      return false;
+    }    
+    std::vector<SignedMessage> messages;
+    messages.clear();
+
     BloomFilterContainer* bfContainer;
     BloomFilterContainer* reduction;
 
@@ -821,12 +880,41 @@ operator<<(std::ostream& os, const Interest& interest)
           reductionIndex = searchForPk(reduction->getSignerId(), additionalSignerList);
         }
         if (reductionIndex == (size_t)-1) {
-          printf("did not find public key of a reduction \n");
+          printf("did not find public key of a reduction for SignerId %lu \n", reduction->getSignerId());
           return false;
         }
         messages.push_back(SignedMessage(reduction->getBloomFilter(), m_signerList[reductionIndex]->m_pk));
       }
     }
+    //printf("at the verification: got %lu signed messages for %lu total BFs \n", messages.size(), getAllBloomFilters().size());
+    return Signer::verify(messages, m_signature);
+  }
+
+  bool Interest::verify3(vector<SidPkPair*> onlySignerList)
+  {
+    if (m_signature == NULL) {
+      printf("ERROR: no signature present");
+      return false;
+    }
+
+    std::vector<SignedMessage> messages;
+    messages.clear();
+    std::vector<P1_Affine> signatures;
+    signatures.clear();
+    signatures.push_back(*m_signature);
+
+    std::vector<BloomFilterContainer*> bfs = getAllBloomFilters();
+    for (size_t i = 0; i < bfs.size(); i++)
+    {
+      size_t index = searchForPk(bfs[i]->getSignerId(), onlySignerList);
+      
+      if (index == (size_t)-1) {
+        printf("did not find public key of a main container, id: %lu \n", bfs[i]->getSignerId());
+        return false;
+      }
+      messages.push_back(SignedMessage(bfs[i]->getBloomFilter(), m_signerList[index]->m_pk));
+    }
+
     return Signer::verify(messages, signatures);
   }
 
@@ -844,5 +932,50 @@ operator<<(std::ostream& os, const Interest& interest)
     }
     return -1;
   }
+
+  size_t Interest::estimateByteSize(bool log)
+  {
+    size_t reductionCount = 0;
+    size_t size = 0;
+    for (size_t i = 0; i < m_bloomFilters.size(); i++)
+    {
+      if (log)
+        printf("Estimating byte size: adding %lu \n", m_bloomFilters[i]->getByteSize());
+      size += m_bloomFilters[i]->getByteSize();
+      reductionCount += m_bloomFilters[i]->getReductions().size();
+    }
+    if (log)
+      printf("Estimating byte size: have %lu bf containers and %lu reductions \n", m_bloomFilters.size(), reductionCount);
+
+    size += m_signerList.size() * 192; // for the signer list
+    size += 96; // for the signature
+    size += 100; // other stuff
+
+    return size;
+  }
+
+  void Interest::logDebug()
+  {
+    cout << "Interest debug: " << getName().toUri() << "\n";
+    m_bloomFilters[0]->printFilter();
+    for (size_t i = 0; i < m_signerList.size(); i++) {
+      P2_Affine *pk = m_signerList[i]->m_pk;
+      byte pkBuffer[192];
+      pk->serialize(pkBuffer);
+      cout << "Printing pk for signer " << m_signerList[i]->m_signerId << "\n";
+      for (size_t j=0; j < 192; j++) {
+        cout << (uint8_t) pkBuffer[j] << "  ";
+      }
+      cout << "\n";
+    }
+    byte sBuffer[96];
+    m_signature->serialize(sBuffer);
+    cout << "Printing signature " << "\n";
+    for (size_t j=0; j < 96; j++) {
+      cout << (uint8_t) sBuffer[j] << "  ";
+    }
+    cout << "\n";
+  }
+
   #pragma endregion
 } // namespace ndn
