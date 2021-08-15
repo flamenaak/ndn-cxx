@@ -271,8 +271,6 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
 
   bool hasBls = m_signature != NULL;
   if(hasBls) {
-    if (!const_cast<Interest &>(*this).verify(vector<SidPkPair*>()))
-      cout << "Interest does not verify before serialization \n";
     { // serialize bf vector
       vector<byte> serializedContainers;
       serializedContainers.clear();
@@ -730,8 +728,23 @@ operator<<(std::ostream& os, const Interest& interest)
       if (signerPair->m_signerId == m_signerList[i]->m_signerId) {
         if (!signerPair->m_pk->is_equal(*(m_signerList[i]->m_pk))) {
           printf("ERROR: signerId %lu has colliding public keys \n", m_signerList[i]->m_signerId);
+          P2_Affine *pk = m_signerList[i]->m_pk;
+          byte pkBuffer[192];
+          pk->serialize(pkBuffer);
+          cout << "Printing pk for signer " << m_signerList[i]->m_signerId << "\n";
+          for (size_t j=0; j < 192; j++) {
+            cout << (uint8_t) pkBuffer[j] << " ";
+          }
+          cout << " vs \n";
+          pk = signerPair->m_pk;
+          pk->serialize(pkBuffer);
+          for (size_t j=0; j < 192; j++) {
+            cout << (uint8_t) pkBuffer[j] << " ";
+          }
+          cout << "\n";
+
+          return;
         }
-        return;
       }
     }
     m_signerList.push_back(signerPair);
@@ -751,16 +764,19 @@ operator<<(std::ostream& os, const Interest& interest)
     size_t index = 0;
     //printf("mergeBf: size of m_bloomFilters %lu \n", m_bloomFilters.size());
     for (size_t i = 0; i < m_bloomFilters.size(); i++) {
+      if (bloomFilter == m_bloomFilters[i])
+      {
+        printf("You cannot merge a BF container with itself \n");
+        continue;
+      }
       unsigned long distance = m_bloomFilters[i]->calculateDistance(bloomFilter->getBloomFilter());
-      if (minDistance == (unsigned long)-1 || distance < minDistance) {
-        if (bloomFilter == m_bloomFilters[i]) continue;
-
+      if (minDistance == (unsigned long)-1 || distance < minDistance) {       
         minDistance = distance;
         closestBloomFilter = m_bloomFilters[i];
         index = i;
       }
     }
-    if (minDistance == -1) {
+    if (minDistance == (unsigned long)-1) {
       m_bloomFilters.push_back(bloomFilter);
     }
     //printf("mergeBf: finished finding nearest \n");
@@ -899,9 +915,6 @@ operator<<(std::ostream& os, const Interest& interest)
 
     std::vector<SignedMessage> messages;
     messages.clear();
-    std::vector<P1_Affine> signatures;
-    signatures.clear();
-    signatures.push_back(*m_signature);
 
     std::vector<BloomFilterContainer*> bfs = getAllBloomFilters();
     for (size_t i = 0; i < bfs.size(); i++)
@@ -912,10 +925,10 @@ operator<<(std::ostream& os, const Interest& interest)
         printf("did not find public key of a main container, id: %lu \n", bfs[i]->getSignerId());
         return false;
       }
-      messages.push_back(SignedMessage(bfs[i]->getBloomFilter(), m_signerList[index]->m_pk));
+      messages.push_back(SignedMessage(bfs[i]->getBloomFilter(), onlySignerList[index]->m_pk));
     }
 
-    return Signer::verify(messages, signatures);
+    return Signer::verify(messages, m_signature);
   }
 
   // extend this when you have a public key cache
