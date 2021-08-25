@@ -781,6 +781,7 @@ operator<<(std::ostream& os, const Interest& interest)
     }
     //printf("mergeBf: finished finding nearest \n");
     if (minDistance <= (unsigned long)DELTA_MAX) {
+      // printf("merfing with distance %lu \n", minDistance);
       if (closestBloomFilter->merge(bloomFilter)) {
         return;
       }
@@ -986,6 +987,20 @@ operator<<(std::ostream& os, const Interest& interest)
     cout << "Printing signature " << "\n";
     for (size_t j=0; j < 96; j++) {
       cout << (uint8_t) sBuffer[j] << "  ";
+    }
+    cout << "\n";
+  }
+
+  void Interest::logDebugContent()
+  {
+    cout << "Interest debug: " << getName().toUri() << "\n";
+    for (size_t i = 0; i < m_bloomFilters.size(); i++) {
+      
+      BloomFilterContainer* container = m_bloomFilters[i];
+      container->printFilter();
+      for (size_t j = 0; j < container->getReductions().size(); j++) {
+        container->getReductions()[j]->printIndexVector();
+      }
     }
     cout << "\n";
   }

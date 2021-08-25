@@ -494,6 +494,7 @@ public:
 
   size_t estimateByteSize(bool log);
   void logDebug();
+  void logDebugContent();
 };
 
 std::ostream&
