@@ -480,16 +480,21 @@ public:
   void setInterestType(const InterestType& newType);
   void setSignature(P1_Affine* newSignaturePtr);
 
+  // aggregate with other 
   void merge(Interest* other);
+  // merge bloomFilter into m_bloomFilters via compression or concatenation
   void mergeBf(BloomFilterContainer* bloomFilter);
 
   void addBloomFilter(BloomFilterContainer* bf);
   vector<BloomFilterContainer*> getAllBloomFilters();
+  // verify the interest's content with its signature
   bool verify(vector<SidPkPair*> additionalSignerList);
   bool verify2(vector<SidPkPair*> additionalSignerList);
+  // verification of interest which does not rely on the signer list carried by the interest, inly on the addtional
   bool verify3(vector<SidPkPair*> additionalSignerList);
 
   size_t getPublicKeyIndex(SignerId signerId);
+  // return index of signerId in the list
   size_t searchForPk(SignerId signerId, vector<SidPkPair*> list);
 
   size_t estimateByteSize(bool log);

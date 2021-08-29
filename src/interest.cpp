@@ -294,8 +294,6 @@ Interest::wireEncode(EncodingImpl<TAG>& encoder) const
         counter++;
         counter+=container->getReductions().size();
       }
-      // if (m_type == InterestType::CAR)
-      //   std::cout << "serialized " << getName().toUri() << " with " << counter << " BFs \n";      
       
       // preppend the vector
       byte containerBuffer[serializedContainers.size()];
@@ -482,8 +480,6 @@ Interest::wireDecode(const Block& wire)
         counter++;
         counter+= container->getReductions().size();
       }
-      // if (m_type == InterestType::CAR)
-      //   std::cout << "deserialized " << getName().toUri() << " with " << counter << " BFs \n";
     }
   }
 
@@ -752,7 +748,6 @@ operator<<(std::ostream& os, const Interest& interest)
 
   void Interest::mergeBf(BloomFilterContainer* bloomFilter)
   {
-    //printf("mergeBf: entered method \n");
     if (m_bloomFilters.size() == 0)
     {
       m_bloomFilters.push_back(bloomFilter);
@@ -762,7 +757,6 @@ operator<<(std::ostream& os, const Interest& interest)
     unsigned long minDistance = -1;
     BloomFilterContainer* closestBloomFilter;
     size_t index = 0;
-    //printf("mergeBf: size of m_bloomFilters %lu \n", m_bloomFilters.size());
     for (size_t i = 0; i < m_bloomFilters.size(); i++) {
       if (bloomFilter == m_bloomFilters[i])
       {
@@ -777,23 +771,24 @@ operator<<(std::ostream& os, const Interest& interest)
       }
     }
     if (minDistance == (unsigned long)-1) {
+      // nothing to merge with
       m_bloomFilters.push_back(bloomFilter);
     }
-    //printf("mergeBf: finished finding nearest \n");
     if (minDistance <= (unsigned long)DELTA_MAX) {
-      // printf("merfing with distance %lu \n", minDistance);
+      // try merge into nearest
       if (closestBloomFilter->merge(bloomFilter)) {
         return;
       }
+      // try mergin nearest into bloomFilter
       else if (bloomFilter->merge(closestBloomFilter)) {
         m_bloomFilters[index] = bloomFilter;
       }
       else {
+        // the filters cannot merge
         m_bloomFilters.push_back(bloomFilter);
       }
     }
     else {
-      // this could be added after this for loop to not slow down next iteration
       // printf("Could not reduce bf, the distance is too great: %lu \n", minDistance);
       m_bloomFilters.push_back(bloomFilter);
     }
@@ -810,13 +805,6 @@ operator<<(std::ostream& os, const Interest& interest)
       printf("not merging, no bloom filters \n");
       return;
     }
-
-    // this is probably not necessary, received interests are already verified
-    
-    // if (!other->verify(additionalSignerList)) {
-    //   printf("could not verify Interest being merged \n");
-    //   return;
-    // }
 
     for (size_t i = 0; i < other->getBloomFilters().size(); i++) {
       mergeBf(other->getBloomFilters()[i]);
@@ -941,7 +929,6 @@ operator<<(std::ostream& os, const Interest& interest)
   size_t Interest::searchForPk(SignerId signerId, vector<SidPkPair*> list)
   {
     for (size_t i = 0; i < list.size(); i++) {
-      //printf("index %lu, signer id %lu \n", i, m_signerList[i]->m_signerId);
       if (list[i]->m_signerId == signerId) return i;
     }
     return -1;
